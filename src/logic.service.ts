@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /* eslint-disable @typescript-eslint/restrict-template-expressions */
-import apm from 'elastic-apm-node';
+
 import axios from 'axios';
 import { databaseManager, server, loggerService } from '.';
 import { type CADPRequest, type TypologyResult } from './classes/cadp-request';
@@ -9,6 +9,7 @@ import { RuleResult } from './classes/rule-result';
 import { configuration } from './config';
 import { type IExpression, type IRuleValue, type ITypologyExpression } from './interfaces/iTypologyExpression';
 import { type MetaData } from './interfaces/metaData';
+import { getCurrentTraceparent, startSpan, startTransaction } from './apm';
 
 const calculateDuration = (startTime: bigint): number => {
   const endTime = process.hrtime.bigint();
@@ -105,7 +106,7 @@ const executeRequest = async (
     transaction,
     networkMap,
   };
-  const spanExecReq = apm.startSpan(`${typologyResult.id}.exec.Req`);
+  const spanExecReq = startSpan(`${typologyResult.id}.exec.Req`);
 
   try {
     const transactionType = 'FIToFIPmtSts';
@@ -141,7 +142,7 @@ const executeRequest = async (
     }
 
     const expression = expressionRes[0][0] as ITypologyExpression;
-    const span = apm.startSpan(`[${transactionID}] eval.typology.expr`);
+    const span = startSpan(`[${transactionID}] eval.typology.expr`);
     const typologyResultValue = evaluateTypologyExpression(expression.rules, ruleResults, expression.expression);
     span?.end();
 
@@ -154,7 +155,7 @@ const executeRequest = async (
     // Interdiction
     // Send Result to CMS
     if (expression.threshold && typologyResultValue > expression.threshold) {
-      const spanSendToTms = apm.startSpan(`[${transactionID}] Interdiction - Send Typology result to CMS`);
+      const spanSendToTms = startSpan(`[${transactionID}] Interdiction - Send Typology result to CMS`);
       executePost(configuration.cmsEndpoint, cadpReqBody)
         .then(() => {
           spanSendToTms?.end();
@@ -166,7 +167,7 @@ const executeRequest = async (
     }
 
     // Send CADP request with this Typology's result
-    const spanCadpr = apm.startSpan(`[${transactionID}] Send Typology result to CADP`);
+    const spanCadpr = startSpan(`[${transactionID}] Send Typology result to CADP`);
     server
       .handleResponse({ ...cadpReqBody, metaData })
       .then(() => {
@@ -177,7 +178,7 @@ const executeRequest = async (
         loggerService.error('Error while sending Typology result to CADP', error as Error);
       });
 
-    const spanDelete = apm.startSpan(`cache.delete.[${transactionID}].Typology interim cache key`);
+    const spanDelete = startSpan(`cache.delete.[${transactionID}].Typology interim cache key`);
     await databaseManager.deleteKey(cacheKey);
     spanDelete?.end();
   } catch (error) {
@@ -195,7 +196,7 @@ export const handleTransaction = async (transaction: any): Promise<void> => {
   let typologyCounter = 0;
   const metaData = transaction.metaData;
   loggerService.log(`traceParent in typroc: ${JSON.stringify(metaData?.traceParent)}`);
-  const apmTransaction = apm.startTransaction('typroc.handleTransaction', {
+  const apmTransaction = startTransaction('typroc.handleTransaction', {
     childOf: metaData?.traceParent,
   });
   const networkMap: NetworkMap = transaction.networkMap;
@@ -205,7 +206,7 @@ export const handleTransaction = async (transaction: any): Promise<void> => {
 
   const requests = [];
 
-  const spanCadpRes = apm.startSpan('cadproc.sendReq');
+  const spanCadpRes = startSpan('cadproc.sendReq');
   for (const channel of networkMap.messages[0].channels) {
     for (const typology of channel.typologies.filter((typo) => typo.rules.some((r) => r.id === ruleResult.id))) {
       // will loop through every Typology here
@@ -215,7 +216,7 @@ export const handleTransaction = async (transaction: any): Promise<void> => {
       requests.push(
         executeRequest(parsedTrans, typology, ruleResult, networkMap, channelHost, {
           ...metaData,
-          traceParent: apm.currentTraceparent,
+          traceParent: getCurrentTraceparent(),
         }),
       );
     }
@@ -233,7 +234,7 @@ export const handleTransaction = async (transaction: any): Promise<void> => {
 
 // Submit the score to the CADP/CMS
 const executePost = async (endpoint: string, request: CADPRequest): Promise<void> => {
-  const span = apm.startSpan('send.cadp/cms');
+  const span = startSpan('send.cadp/cms');
   try {
     const cadpRes = await axios.post(endpoint, request);
     if (cadpRes.status !== 200) {
